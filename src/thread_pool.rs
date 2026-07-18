@@ -1,25 +1,11 @@
 use crate::worker::Worker;
-use std::panic::UnwindSafe;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-type JobFn<T> = Box<dyn FnOnce() -> T + Send + 'static + UnwindSafe>;
-pub struct Job<T> {
-    pub job: JobFn<T>,
-    pub oneshot_sender: async_oneshot_channel::Sender<T>,
-}
+type Job = Box<dyn FnOnce() + Send>;
 
-impl<T> Job<T> {
-    pub fn new(job: JobFn<T>, oneshot_sender: async_oneshot_channel::Sender<T>) -> Self {
-        Self {
-            job,
-            oneshot_sender,
-        }
-    }
-}
-
-fn thread_loop<T>(i: u32, recv_mutex_clone: Arc<Mutex<Receiver<Job<T>>>>) {
+fn thread_loop(i: u32, recv_mutex_clone: Arc<Mutex<Receiver<Job>>>) {
     loop {
         // The reason for this block is to drop the mutex guard immediately after
         // reading the closure
@@ -30,10 +16,7 @@ fn thread_loop<T>(i: u32, recv_mutex_clone: Arc<Mutex<Receiver<Job<T>>>>) {
 
         match closure {
             Ok(job) => {
-                let sender = job.oneshot_sender;
-                let job_fn = job.job;
-                let result = job_fn();
-                let _ = sender.send(result);
+                job();
                 println!("Thread {} Finished", i);
             }
             Err(..) => {
@@ -44,17 +27,14 @@ fn thread_loop<T>(i: u32, recv_mutex_clone: Arc<Mutex<Receiver<Job<T>>>>) {
 }
 
 #[allow(unused)]
-pub struct AbdoThreadPool<T> {
+pub struct AbdoThreadPool {
     workers: Vec<Worker>,
-    sender: Option<Sender<Job<T>>>,
+    sender: Option<Sender<Job>>,
 }
 
-impl<T> AbdoThreadPool<T>
-where
-    T: 'static + Sync + Send,
-{
+impl AbdoThreadPool {
     pub fn new(workers_num: u32) -> Self {
-        let (sender, receiver): (Sender<Job<T>>, Receiver<Job<T>>) = channel();
+        let (sender, receiver): (Sender<Job>, Receiver<Job>) = channel();
 
         let recv_mutex = Arc::new(Mutex::new(receiver));
         let mut workers = Vec::new();
@@ -76,27 +56,24 @@ where
         }
     }
 
-    pub async fn execute(&self, closure: JobFn<T>) -> T {
-        // closure -> box(closure) -> send to thread
-        // first: create one-shot channel
+    pub async fn execute<F, T>(&self, closure: F) -> async_oneshot_channel::Receiver<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
         let (oneshot_sender, oneshot_recv) = async_oneshot_channel::oneshot::<T>();
 
-        // second : create Job
-        let job = Job::new(closure, oneshot_sender);
+        let wrapped_job = move || {
+            let result = closure();
+            let _ = oneshot_sender.send(result);
+        };
 
-        // send it in the mpsc
-        let _ = self
-            .sender
-            .as_ref()
-            .expect("Thread Pool Closed ")
-            .send(job)
-            .unwrap();
-
-        oneshot_recv.recv().await.take().unwrap()
+        let _ = self.sender.as_ref().unwrap().send(Box::new(wrapped_job));
+        oneshot_recv
     }
 }
 
-impl<T> Drop for AbdoThreadPool<T> {
+impl Drop for AbdoThreadPool {
     fn drop(&mut self) {
         self.sender.take();
         for worker in &mut self.workers {

@@ -20,7 +20,12 @@ async fn main() {
     let mut sum = 0;
 
     for _ in 0..n_jobs {
-        let x = pool.execute(Box::new(|| my_func(8))).await;
+        let x = pool
+            .execute(Box::new(|| my_func(8)))
+            .await
+            .recv()
+            .await
+            .unwrap();
         sum += x;
     }
 
