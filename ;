@@ -1,5 +1,6 @@
 mod thread_pool;
 mod worker;
+
 use crate::thread_pool::AbdoThreadPool;
 //use std::sync::Arc;
 //use std::sync::Mutex;
@@ -19,10 +20,7 @@ async fn main() {
 
     let mut sum = 0;
 
-    for _ in 0..n_jobs {
-        let x = pool.execute(Box::new(|| my_func(8))).await;
-        sum += x;
+    for i in 0..n_jobs {
+        let res = pool.execute(move || my_func(i)).await.take();
     }
-
-    println!("Total sum : {}", sum);
 }
