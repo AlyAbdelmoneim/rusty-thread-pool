@@ -1,22 +1,26 @@
 use crate::worker::Worker;
+use std::panic::{RefUnwindSafe, UnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-type Job = Box<dyn FnOnce() + Send>;
+type Job = Box<dyn FnOnce() + Send + 'static>;
 
 fn thread_loop(i: u32, recv_mutex_clone: Arc<Mutex<Receiver<Job>>>) {
     loop {
         // The reason for this block is to drop the mutex guard immediately after
         // reading the closure
-        let closure = {
+        let receieved_job = {
             let receiver = recv_mutex_clone.lock().unwrap();
             receiver.recv()
         };
 
-        match closure {
+        match receieved_job {
             Ok(job) => {
-                job();
+                match catch_unwind(std::panic::AssertUnwindSafe(job)) {
+                    Ok(()) => {}
+                    Err(..) => println!("Thread resurrected after panic"),
+                }
                 println!("Thread {} Finished", i);
             }
             Err(..) => {
@@ -56,10 +60,10 @@ impl AbdoThreadPool {
         }
     }
 
-    pub async fn execute<F, T>(&self, closure: F) -> async_oneshot_channel::Receiver<T>
+    pub fn execute<F, T>(&self, closure: F) -> async_oneshot_channel::Receiver<T>
     where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static + UnwindSafe,
+        T: Send + 'static + RefUnwindSafe,
     {
         let (oneshot_sender, oneshot_recv) = async_oneshot_channel::oneshot::<T>();
 
@@ -68,7 +72,11 @@ impl AbdoThreadPool {
             let _ = oneshot_sender.send(result);
         };
 
-        let _ = self.sender.as_ref().unwrap().send(Box::new(wrapped_job));
+        let _ = self
+            .sender
+            .as_ref()
+            .expect("Thread Pool Killed")
+            .send(Box::new(wrapped_job));
         oneshot_recv
     }
 }
